@@ -87,7 +87,8 @@ class WtmSession:
                 },
             )
             match = re.search(
-                r'setAmazonMovieName\("(.*)"\)', solution_response.content.decode()
+                r'setAmazonMovieName\("(.*)"\)',
+                solution_response.content.decode("unicode-escape"),
             )
 
             if match:
