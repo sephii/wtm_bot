@@ -30,7 +30,6 @@ class GameStatus(enum.Enum):
 
 class CommandType(enum.Enum):
     START = "start"
-    SKIP = "skip"
     HELP = "help"
 
 
@@ -71,9 +70,17 @@ class Game:
         self.shots_queue = asyncio.Queue()
         self.current_shot = None
         self.current_combo = None
+        self.skip_votes = set()
         self.signal_subscribers = defaultdict(list)
 
+    @property
+    def nb_players(self):
+        return len(self.scores)
+
     async def handle_guess(self, player, guess, **kwargs):
+        if player not in self.scores:
+            self.scores[player] = 0
+
         if fuzzy_compare(self.current_shot.movie_name, guess):
             if self.current_combo and self.current_combo.player == player:
                 self.current_combo = dataclasses.replace(
@@ -117,6 +124,7 @@ class Game:
             self.current_shot = await self.shots_queue.get()
             logging.debug("Got shot from queue")
 
+            self.skip_votes = set()
             self.status = GameStatus.WAITING_FOR_GUESSES
             await self.emit_signal("new_shot", shot_number=shot_number)
             self.guess_timer = asyncio.create_task(asyncio.sleep(GUESS_TIME_SECONDS))
@@ -136,8 +144,8 @@ class Game:
 
         await self.emit_signal("game_finished")
 
-    async def skip(self, **kwargs):
-        await self.emit_signal("shot_skipped", **kwargs)
+    async def skip(self):
+        await self.emit_signal("shot_skipped")
         self.guess_timer.cancel()
 
     async def emit_signal(self, signal_name, *args, **kwargs):
@@ -150,11 +158,21 @@ class Game:
     def subscribe_to_signal(self, signal_name, callback):
         self.signal_subscribers[signal_name].append(callback)
 
+    async def vote_skip(self, player):
+        if self.status != GameStatus.WAITING_FOR_GUESSES:
+            return
+
+        self.skip_votes.add(player)
+
+        if len(self.skip_votes) >= len(self.scores) // 2:
+            await self.skip()
+
 
 class DiscordUi:
     def __init__(self, channel, game):
         self.channel = channel
         self.game = game
+        self.shot_message = None
 
         self.game.subscribe_to_signal("shot_skipped", self.shot_skipped)
         self.game.subscribe_to_signal("game_finished", self.game_finished)
@@ -197,14 +215,14 @@ class DiscordUi:
         shot = self.game.current_shot
         filename = shot.image_url[shot.image_url.rfind("/") :]
         embed = discord.Embed(
-            title="Guess the movie! ⬆",
-            description="To skip it, send `@WhatTheMovie skip`.",
+            title="Guess the movie! ⬆", description="To skip it, react with ⏭.",
         )
         embed.set_footer(text=f"{shot_number} / {NB_SHOTS}")
-        await self.channel.send(
+        self.shot_message = await self.channel.send(
             embed=embed,
             files=[discord.File(fp=io.BytesIO(shot.image_data), filename=filename,)],
         )
+        await self.shot_message.add_reaction("⏭")
 
     async def shot_timeout(self):
         await self.channel.send(
@@ -221,26 +239,32 @@ class DiscordUi:
         )
         await self.channel.send("The movie quiz is finished!", embed=embed)
 
-    async def shot_skipped(self, message):
+    async def shot_skipped(self):
         embed = discord.Embed(
             title="Shot skipped",
             description=f"The movie was **{self.game.current_shot.movie_name}**.",
         )
-        asyncio.gather(message.add_reaction("👌"), self.channel.send(embed=embed))
+        await self.channel.send(embed=embed)
 
 
 class WtmClient(discord.Client):
     def __init__(self, wtm_user, wtm_password, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.games = {}
+        self.uis = {}
         self.wtm_user = wtm_user
         self.wtm_password = wtm_password
+
+    def get_game(self, channel_id):
+        return self.uis[channel_id].game
 
     async def on_ready(self):
         logger.info("Logged in as %s", self.user)
 
     async def start_game(self, channel, difficulty):
-        game = self.games.get(channel.id)
+        try:
+            game = self.get_game(channel.id)
+        except KeyError:
+            game = None
 
         if game and game.status != GameStatus.IDLE:
             logger.error(
@@ -255,20 +279,40 @@ class WtmClient(discord.Client):
         )
 
         game = Game(wtm_user=self.wtm_user, wtm_password=self.wtm_password)
-        DiscordUi(channel, game)
+        ui = DiscordUi(channel, game)
 
-        self.games[channel.id] = game
+        self.uis[channel.id] = ui
 
         try:
             await game.game_loop(difficulty)
         finally:
-            del self.games[channel.id]
+            del self.uis[channel.id]
+
+    async def on_reaction_add(self, reaction, user):
+        if user.id == self.user.id:
+            return
+
+        try:
+            ui = self.uis[reaction.message.channel.id]
+        except KeyError:
+            return
+
+        if (
+            ui.shot_message
+            and ui.shot_message.id == reaction.message.id
+            and reaction.emoji == "⏭"
+        ):
+            await ui.game.vote_skip(user.name)
 
     async def on_message(self, message):
         if message.author.id == self.user.id:
             return
 
-        game = self.games.get(message.channel.id)
+        try:
+            game = self.get_game(message.channel.id)
+        except KeyError:
+            game = None
+
         try:
             command = self.get_command(message)
         except ValueError as e:
@@ -295,16 +339,9 @@ class WtmClient(discord.Client):
                 difficulty = Difficulty.EASY
 
             await self.start_game(message.channel, difficulty)
-        elif (
-            command
-            and command.type == CommandType.SKIP
-            and game
-            and game.status == GameStatus.WAITING_FOR_GUESSES
-        ):
-            await game.skip(message=message)
         elif command and command.type == CommandType.HELP:
             await message.channel.send(
-                "Available commands are: start [easy|medium|hard], skip."
+                "Available commands are: start [easy|medium|hard]."
             )
         elif game and game.status == GameStatus.WAITING_FOR_GUESSES:
             await game.handle_guess(
