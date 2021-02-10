@@ -65,43 +65,59 @@ class WtmSession:
             },
         )
 
-    async def _get_random_shot(self):
-        response = await self.client.get(wtm_url("/shot/random"))
-        parser = get_parser(response.content)
-        image = parser.select("#still_shot")[0]["src"]
-        try:
-            solution_url = parser.select("#solucebutton")[0]["href"]
-        except IndexError:
-            solution_url = None
+    async def _get_random_shot(self, nsfw_ok, exclude_tags=None):
+        shot = None
 
-        solution = None
-        if solution_url:
-            solution_response = await self.client.get(
-                wtm_url(solution_url),
-                headers={
-                    "Referer": str(response.url),
-                    "X-CSRF-Token": parser.select("meta[name='csrf-token']")[0][
-                        "content"
-                    ],
-                    "X-Requested-With": "XMLHttpRequest",
-                },
-            )
-            match = re.search(
-                r'setAmazonMovieName\("(.*)"\)',
-                solution_response.content.decode("unicode-escape"),
-            )
+        while not shot:
+            response = await self.client.get(wtm_url("/shot/random"))
+            parser = get_parser(response.content)
+            image = parser.select("#still_shot")[0]["src"]
+            try:
+                solution_url = parser.select("#solucebutton")[0]["href"]
+            except IndexError:
+                solution_url = None
 
-            if match:
-                solution = match.group(1)
+            nsfw = len(parser.select("div.nsfw")) > 0
+            if nsfw and not nsfw_ok:
+                continue
 
-        r = await self.client.get(image, headers={"Referer": str(response.url)})
+            if exclude_tags:
+                tags = {
+                    element.text for element in parser.select("#shot_tag_list li a")
+                }
+                if tags & exclude_tags:
+                    continue
 
-        return Shot(image_data=r.read(), image_url=str(image), movie_name=solution)
+            solution = None
+            if solution_url:
+                solution_response = await self.client.get(
+                    wtm_url(solution_url),
+                    headers={
+                        "Referer": str(response.url),
+                        "X-CSRF-Token": parser.select("meta[name='csrf-token']")[0][
+                            "content"
+                        ],
+                        "X-Requested-With": "XMLHttpRequest",
+                    },
+                )
+                match = re.search(
+                    r'setAmazonMovieName\("(.*)"\)', solution_response.content.decode(),
+                )
+
+                if match:
+                    solution = match.group(1)
+
+            r = await self.client.get(image, headers={"Referer": str(response.url)})
+            shot = Shot(image_data=r.read(), image_url=str(image), movie_name=solution)
+
+        return shot
 
     async def get_random_shot(self, require_solution=False):
         shot = None
 
         while shot is None or (shot.movie_name is None and require_solution):
-            shot = await self._get_random_shot()
+            shot = await self._get_random_shot(
+                nsfw_ok=False, exclude_tags={"nude", "nudity", "boob", "boobs"}
+            )
 
         return shot
