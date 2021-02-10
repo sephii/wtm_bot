@@ -17,7 +17,7 @@ setup(
     author="Sylvain Fankhauser",
     author_email="sephi@fhtagn.top",
     url="https://github.com/sephii/wtm_bot",
-    install_requires=[],
+    install_requires=install_requires,
     license="mit",
     include_package_data=False,
     python_requires=">=3.7",
