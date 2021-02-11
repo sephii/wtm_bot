@@ -21,12 +21,19 @@ class Shot:
     movie_name: Optional[str]
 
 
+js_unicode_re = re.compile(r"\\u(\d{4})")
+
+
 def wtm_url(url):
     return f"https://whatthemovie.com{url}"
 
 
 def get_parser(content):
     return bs4.BeautifulSoup(content, "html.parser")
+
+
+def unescape_js_unicode(match):
+    return chr(int(match.group(1), 16))
 
 
 class WtmSession:
@@ -105,7 +112,7 @@ class WtmSession:
                 )
 
                 if match:
-                    solution = match.group(1)
+                    solution = js_unicode_re.sub(unescape_js_unicode, match.group(1))
 
             r = await self.client.get(image, headers={"Referer": str(response.url)})
             shot = Shot(image_data=r.read(), image_url=str(image), movie_name=solution)
