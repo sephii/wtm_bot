@@ -1,7 +1,9 @@
+import asyncio
 import enum
 import re
+import urllib.parse
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import bs4
 import httpx
@@ -18,10 +20,13 @@ class Difficulty(enum.Enum):
 class Shot:
     image_data: bytes
     image_url: str
-    movie_name: Optional[str]
+    movie_title: Optional[str]
+    movie_alternative_titles: List[str]
+    movie_year: Optional[int]
 
 
-js_unicode_re = re.compile(r"\\u(\d{4})")
+js_unicode_re = re.compile(r"\\u([0-9a-f]{4})")
+tmdb_base_url = "https://api.themoviedb.org/3"
 
 
 def wtm_url(url):
@@ -36,9 +41,52 @@ def unescape_js_unicode(match):
     return chr(int(match.group(1), 16))
 
 
-class WtmSession:
-    def __init__(self):
+class TmdbClient:
+    def __init__(self, api_key):
+        self.api_key = api_key
         self.client = httpx.AsyncClient()
+
+    async def get_movie_name(self, movie_id, lang):
+        url = tmdb_base_url + f"/movie/{movie_id}"
+        response = await self.client.get(
+            url, params={"language": lang, "api_key": self.api_key}
+        )
+
+        if response.status_code != 200:
+            return None
+
+        try:
+            return response.json()["title"]
+        except KeyError:
+            return None
+
+    async def get_alternative_titles(self, title, year):
+        url = tmdb_base_url + "/search/movie"
+        response = await self.client.get(
+            url, params={"api_key": self.api_key, "query": title, "year": year},
+        )
+
+        if response.status_code != 200:
+            return set()
+
+        try:
+            response_data = response.json()
+            if not response_data["results"]:
+                return set()
+        except (ValueError, KeyError):
+            return set()
+
+        movie_id = response_data["results"][0]["id"]
+        titles = await asyncio.gather(
+            *[self.get_movie_name(movie_id, lang) for lang in ("fr-FR", "en-US")]
+        )
+        return set(title for title in titles if title)
+
+
+class WtmSession:
+    def __init__(self, tmdb_token):
+        self.client = httpx.AsyncClient()
+        self.tmdb_client = TmdbClient(tmdb_token)
 
     async def login(self, username, password):
         login_url = wtm_url("/user/login")
@@ -95,7 +143,9 @@ class WtmSession:
                 if tags & exclude_tags:
                     continue
 
-            solution = None
+            title = None
+            year = None
+            alternative_titles = set()
             if solution_url:
                 solution_response = await self.client.get(
                     wtm_url(solution_url),
@@ -107,22 +157,38 @@ class WtmSession:
                         "X-Requested-With": "XMLHttpRequest",
                     },
                 )
-                match = re.search(
-                    r'setAmazonMovieName\("(.*)"\)', solution_response.content.decode(),
+                solution_code = js_unicode_re.sub(
+                    unescape_js_unicode, solution_response.content.decode()
                 )
+                title_match = re.search(
+                    r'setAmazonMovieName\((["\'])(?P<title>.*)\1\)', solution_code
+                )
+                year_match = re.search(r"<strong>.+\((\d+)\)</strong>", solution_code)
 
-                if match:
-                    solution = js_unicode_re.sub(unescape_js_unicode, match.group(1))
+                if title_match and year_match:
+                    title = urllib.parse.unquote_plus(
+                        title_match.group("title").strip()
+                    )
+                    year = int(year_match.group(1))
+                    alternative_titles = await self.tmdb_client.get_alternative_titles(
+                        title, year
+                    ) - {title}
 
             r = await self.client.get(image, headers={"Referer": str(response.url)})
-            shot = Shot(image_data=r.read(), image_url=str(image), movie_name=solution)
+            shot = Shot(
+                image_data=r.read(),
+                image_url=str(image),
+                movie_title=title,
+                movie_alternative_titles=alternative_titles,
+                movie_year=year,
+            )
 
         return shot
 
     async def get_random_shot(self, require_solution=False):
         shot = None
 
-        while shot is None or (shot.movie_name is None and require_solution):
+        while shot is None or (not shot.movie_title and require_solution):
             shot = await self._get_random_shot(
                 nsfw_ok=False, exclude_tags={"nude", "nudity", "boob", "boobs"}
             )

@@ -1,4 +1,3 @@
-# TODO add nsfw filter (search for `div.nsfw`)
 import asyncio
 import dataclasses
 import difflib
@@ -45,26 +44,44 @@ class Combo:
     combo: int
 
 
-def fuzzy_compare(movie_name, guess):
-    movie_name = movie_name.lower()
-    guess = guess.lower()
+@dataclass(frozen=True)
+class FuzzyResult:
+    match: str
+    score: float
 
-    movie_name_parts = movie_name.split(":") + [movie_name]
-    ratios = (
-        difflib.SequenceMatcher(lambda x: x in " \t", movie_name_part, guess).ratio()
-        for movie_name_part in movie_name_parts
+
+def _fuzzy_compare_str(str1, str2):
+    str1_lower = str1.lower()
+    str1_parts = str1_lower.split(":") + [str1_lower]
+    max_ratio = max(
+        difflib.SequenceMatcher(lambda x: x in " \t", str1_part, str2).ratio()
+        for str1_part in str1_parts
     )
 
-    return any(ratio >= 0.8 for ratio in ratios)
+    return max_ratio
+
+
+def fuzzy_compare(solutions, guess):
+    """
+    Compare a list of solutions and a guess, and return the highest scoring one
+    as a `FuzzyResult`, or `None` if there’s no match.
+    """
+    guess = guess.lower()
+    results = [
+        FuzzyResult(match=solution, score=_fuzzy_compare_str(solution, guess))
+        for solution in solutions
+    ]
+
+    return max(results, key=lambda item: item.score, default=None)
 
 
 class Game:
-    def __init__(self, wtm_user, wtm_password):
+    def __init__(self, *, wtm_user, wtm_password, tmdb_token):
         self.wtm_user = wtm_user
         self.wtm_password = wtm_password
 
         self.scores = defaultdict(int)
-        self.wtm_session = WtmSession()
+        self.wtm_session = WtmSession(tmdb_token)
         self.status = GameStatus.IDLE
         self.guess_timer = None
         self.shots_queue = asyncio.Queue()
@@ -81,7 +98,13 @@ class Game:
         if player not in self.scores:
             self.scores[player] = 0
 
-        if fuzzy_compare(self.current_shot.movie_name, guess):
+        fuzzy_result = fuzzy_compare(
+            set([self.current_shot.movie_title])
+            | self.current_shot.movie_alternative_titles,
+            guess,
+        )
+
+        if fuzzy_result and fuzzy_result.score >= 0.8:
             if self.current_combo and self.current_combo.player == player:
                 self.current_combo = dataclasses.replace(
                     self.current_combo, combo=self.current_combo.combo + 1
@@ -90,7 +113,9 @@ class Game:
                 self.current_combo = Combo(player=player, combo=1)
             self.scores[player] += self.current_combo.combo
             self.status = GameStatus.LOADING
-            await self.emit_signal("correct_guess", player=player, **kwargs)
+            await self.emit_signal(
+                "correct_guess", player=player, movie_title=fuzzy_result.match, **kwargs
+            )
             self.guess_timer.cancel()
         else:
             if self.current_combo and self.current_combo.player == player:
@@ -123,6 +148,7 @@ class Game:
             logging.debug("Getting shot from queue")
             self.current_shot = await self.shots_queue.get()
             logging.debug("Got shot from queue")
+            logging.debug("Movie title: %s", self.current_shot.movie_title)
 
             self.skip_votes = set()
             self.status = GameStatus.WAITING_FOR_GUESSES
@@ -191,10 +217,12 @@ class DiscordUi:
             for symbol, (name, score) in zip(["🥇", "🥈", "🥉"], ranking)
         ]
 
-    async def correct_guess(self, player, message):
+    async def correct_guess(self, player, message, movie_title):
         congrats_messages = ["yay", "correct", "nice", "good job", "👏", "you rock"]
         congrats_message = random.choice(congrats_messages)
-        embed = discord.Embed(title=f"It was **{self.game.current_shot.movie_name}**")
+        embed = discord.Embed(
+            title=f"It was **{movie_title}** ({self.game.current_shot.movie_year})"
+        )
         embed.add_field(
             name="**Leaderboard**", value="\n".join(self.get_ranking(self.game.scores)),
         )
@@ -228,7 +256,7 @@ class DiscordUi:
         await self.channel.send(
             embed=discord.Embed(
                 title="Time’s up! ⌛",
-                description=f"The movie was **{self.game.current_shot.movie_name}**.",
+                description=f"The movie was **{self.game.current_shot.movie_title}** ({self.game.current_shot.movie_year}).",
             )
         )
 
@@ -242,17 +270,18 @@ class DiscordUi:
     async def shot_skipped(self):
         embed = discord.Embed(
             title="Shot skipped",
-            description=f"The movie was **{self.game.current_shot.movie_name}**.",
+            description=f"The movie was **{self.game.current_shot.movie_title}** ({self.game.current_shot.movie_year}).",
         )
         await self.channel.send(embed=embed)
 
 
 class WtmClient(discord.Client):
-    def __init__(self, wtm_user, wtm_password, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, wtm_user, wtm_password, tmdb_token):
+        super().__init__()
         self.uis = {}
         self.wtm_user = wtm_user
         self.wtm_password = wtm_password
+        self.tmdb_token = tmdb_token
 
     def get_game(self, channel_id):
         return self.uis[channel_id].game
@@ -278,7 +307,11 @@ class WtmClient(discord.Client):
             f"Get ready, a new game is about to start in **{difficulty.value}** difficulty! Aaaaaand action! 🎬"
         )
 
-        game = Game(wtm_user=self.wtm_user, wtm_password=self.wtm_password)
+        game = Game(
+            wtm_user=self.wtm_user,
+            wtm_password=self.wtm_password,
+            tmdb_token=self.tmdb_token,
+        )
         ui = DiscordUi(channel, game)
 
         self.uis[channel.id] = ui
@@ -367,7 +400,7 @@ class WtmClient(discord.Client):
 def main():
     env_vars = {
         var_name: os.environ.get(var_name)
-        for var_name in ("WTM_USER", "WTM_PASSWORD", "DISCORD_TOKEN")
+        for var_name in ("WTM_USER", "WTM_PASSWORD", "DISCORD_TOKEN", "TMDB_TOKEN")
     }
     missing_vars = {var_name for var_name, value in env_vars.items() if not value}
 
@@ -379,7 +412,9 @@ def main():
         sys.exit(1)
 
     client = WtmClient(
-        wtm_user=env_vars["WTM_USER"], wtm_password=env_vars["WTM_PASSWORD"]
+        wtm_user=env_vars["WTM_USER"],
+        wtm_password=env_vars["WTM_PASSWORD"],
+        tmdb_token=env_vars["TMDB_TOKEN"],
     )
 
     client.run(env_vars["DISCORD_TOKEN"])
