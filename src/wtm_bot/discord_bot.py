@@ -16,6 +16,7 @@ from wtm_bot.wtm import Difficulty, WtmSession
 
 NB_SHOTS = 12
 GUESS_TIME_SECONDS = 30
+MAX_COMBO = 2
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -107,7 +108,8 @@ class Game:
         if fuzzy_result and fuzzy_result.score >= 0.8:
             if self.current_combo and self.current_combo.player == player:
                 self.current_combo = dataclasses.replace(
-                    self.current_combo, combo=self.current_combo.combo + 1
+                    self.current_combo,
+                    combo=min(self.current_combo.combo + 1, MAX_COMBO),
                 )
             else:
                 self.current_combo = Combo(player=player, combo=1)
@@ -231,7 +233,7 @@ class DiscordUi:
         asyncio.gather(
             message.add_reaction("✅"),
             self.channel.send(
-                f"@{player} {congrats_message}! You earn **{pts} {pts_description}**. Keep scoring to use your {self.game.current_combo.combo + 1}x multiplier!",
+                f"@{player} {congrats_message}! You earn **{pts} {pts_description}**. Keep scoring to use your {min(self.game.current_combo.combo + 1, MAX_COMBO)}x multiplier!",
                 embed=embed,
             ),
         )
