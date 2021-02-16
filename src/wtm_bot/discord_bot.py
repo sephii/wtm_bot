@@ -265,6 +265,10 @@ class DiscordUi:
         embed = discord.Embed(
             title="Ranking", description=ranking if self.game.scores else "No scores!"
         )
+        embed.add_field(
+            name="About this quiz",
+            value="Images courtesy of https://whatthemovie.com, go there to keep guessing!",
+        )
         await self.channel.send("The movie quiz is finished!", embed=embed)
 
     async def shot_skipped(self):
