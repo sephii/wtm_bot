@@ -3,20 +3,24 @@ import dataclasses
 import difflib
 import enum
 import io
+import json
 import logging
 import os
 import random
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import List
 
 import discord
+
 from wtm_bot.wtm import Difficulty, WtmSession
 
-NB_SHOTS = 12
+NB_SHOTS = 2
 GUESS_TIME_SECONDS = 30
 MAX_COMBO = 2
+STATS_DIR = "/tmp/tmp"
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -51,6 +55,127 @@ class FuzzyResult:
     score: float
 
 
+@dataclass(frozen=True)
+class Stat:
+    player_id: str
+    player_name: str
+    nb_games: int
+    nb_guesses: int
+    nb_shots_guessed: int
+    nb_correct_guesses: int
+    nb_skips: int
+    nb_aces: int
+    max_streak: int
+    reaction_time: float
+
+    def __add__(self, other):
+        if self.player_id != other.player_id:
+            raise ValueError("Players are not the same, cannot add")
+
+        return Stat(
+            player_id=self.player_id,
+            player_name=other.player_name,
+            nb_games=self.nb_games + other.nb_games,
+            nb_guesses=self.nb_guesses + other.nb_guesses,
+            nb_correct_guesses=self.nb_correct_guesses + other.nb_correct_guesses,
+            reaction_time=(
+                self.reaction_time * self.nb_shots_guessed
+                + other.reaction_time * other.nb_shots_guessed
+            )
+            / (self.nb_guesses + other.nb_guesses),
+            nb_skips=self.nb_skips + other.nb_skips,
+            nb_shots_guessed=self.nb_shots_guessed + other.nb_shots_guessed,
+            nb_aces=self.nb_aces + other.nb_aces,
+            max_streak=max(self.max_streak, other.max_streak),
+        )
+
+
+class Stats:
+    def __init__(self):
+        self.stats = {}
+
+    def get_stat(self, player_id, player_name):
+        try:
+            return self.stats[player_id]
+        except KeyError:
+            return Stat(
+                player_id=player_id,
+                player_name=player_name,
+                nb_games=0,
+                nb_guesses=0,
+                nb_shots_guessed=0,
+                nb_correct_guesses=0,
+                reaction_time=0,
+                nb_skips=0,
+                nb_aces=0,
+                max_streak=0,
+            )
+
+    def skip(self, player_id, player_name):
+        stat = self.get_stat(player_id, player_name)
+        self.stats[player_id] = dataclasses.replace(stat, nb_skips=stat.nb_skips + 1)
+
+    def guess(self, player_id, player_name, is_correct, is_ace, reaction_time, streak):
+        stat = self.get_stat(player_id, player_name)
+        self.stats[player_id] = dataclasses.replace(
+            stat,
+            nb_guesses=stat.nb_guesses + 1,
+            nb_shots_guessed=stat.nb_shots_guessed
+            + (0 if reaction_time is None else 1),
+            nb_correct_guesses=stat.nb_correct_guesses + (1 if is_correct else 0),
+            reaction_time=(stat.reaction_time * stat.nb_shots_guessed + reaction_time)
+            / (stat.nb_shots_guessed + 1)
+            if reaction_time is not None
+            else stat.reaction_time,
+            nb_aces=stat.nb_aces + (1 if is_ace else 0),
+            max_streak=max(stat.max_streak, streak),
+        )
+
+    def end_game(self):
+        self.stats = {
+            player_id: dataclasses.replace(stat, nb_games=stat.nb_games + 1)
+            for player_id, stat in self.stats.items()
+        }
+
+    @staticmethod
+    def load(file_path):
+        stats = Stats()
+
+        with open(file_path, "r") as f:
+            stats.stats = {
+                int(player_id): Stat(**obj)
+                for player_id, obj in json.loads(f.read()).items()
+            }
+
+        return stats
+
+    def dumps(self):
+        return json.dumps(
+            {
+                player_id: dataclasses.asdict(stat)
+                for player_id, stat in self.stats.items()
+            }
+        )
+
+    def __add__(self, other):
+        stats = {player_id: stat for player_id, stat in self.stats.items()}
+
+        for player_id, stat in other.stats.items():
+            if player_id not in stats:
+                stats[player_id] = stat
+            else:
+                stats[player_id] += stat
+
+        s = Stats()
+        s.stats = stats
+
+        return s
+
+
+def get_stats_file_path(game_id: int) -> str:
+    return os.path.join(STATS_DIR, f"{game_id}.json")
+
+
 def _fuzzy_compare_str(str1, str2):
     str1_lower = str1.lower()
     str1_parts = str1_lower.split(":") + [str1_lower]
@@ -76,54 +201,98 @@ def fuzzy_compare(solutions, guess):
     return max(results, key=lambda item: item.score, default=None)
 
 
+class Round:
+    def __init__(self, shot):
+        self.shot = shot
+        self.started_at = None
+        self.guessers = set()
+        self.skip_votes = set()
+
+    def start(self):
+        self.started_at = time.monotonic()
+        return asyncio.create_task(asyncio.sleep(GUESS_TIME_SECONDS))
+
+    @property
+    def elapsed_time(self):
+        return time.monotonic() - self.started_at if self.started_at else 0
+
+    def guess(self, player_id, guess):
+        fuzzy_result = fuzzy_compare(
+            set([self.shot.movie_title]) | self.shot.movie_alternative_titles, guess,
+        )
+        self.guessers.add(player_id)
+
+        return fuzzy_result
+
+
 class Game:
     def __init__(self, *, wtm_user, wtm_password, tmdb_token):
         self.wtm_user = wtm_user
         self.wtm_password = wtm_password
 
         self.scores = defaultdict(int)
+        self.stats = Stats()
         self.wtm_session = WtmSession(tmdb_token)
         self.status = GameStatus.IDLE
         self.guess_timer = None
         self.shots_queue = asyncio.Queue()
-        self.current_shot = None
-        self.current_combo = None
-        self.skip_votes = set()
         self.signal_subscribers = defaultdict(list)
+        self.current_round = None
+        self.current_combo = None
 
     @property
     def nb_players(self):
         return len(self.scores)
 
-    async def handle_guess(self, player, guess, **kwargs):
-        if player not in self.scores:
-            self.scores[player] = 0
+    async def handle_guess(self, player_id, player_name, guess, **kwargs):
+        if player_name not in self.scores:
+            self.scores[player_name] = 0
 
-        fuzzy_result = fuzzy_compare(
-            set([self.current_shot.movie_title])
-            | self.current_shot.movie_alternative_titles,
-            guess,
-        )
+        first_guess = player_id not in self.current_round.guessers
+        fuzzy_result = self.current_round.guess(player_id, guess)
 
         if fuzzy_result and fuzzy_result.score >= 0.8:
-            if self.current_combo and self.current_combo.player == player:
+            if self.current_combo and self.current_combo.player == player_name:
                 self.current_combo = dataclasses.replace(
-                    self.current_combo,
-                    combo=min(self.current_combo.combo + 1, MAX_COMBO),
+                    self.current_combo, combo=self.current_combo.combo + 1,
                 )
+                streak = self.current_combo.combo
             else:
-                self.current_combo = Combo(player=player, combo=1)
-            self.scores[player] += self.current_combo.combo
+                self.current_combo = Combo(player=player_name, combo=1)
+                streak = 1
+
+            self.stats.guess(
+                player_id=player_id,
+                player_name=player_name,
+                is_correct=True,
+                reaction_time=self.current_round.elapsed_time if first_guess else None,
+                is_ace=first_guess,
+                streak=streak,
+            )
+
+            self.scores[player_name] += min(self.current_combo.combo, MAX_COMBO)
+
             self.status = GameStatus.LOADING
             await self.emit_signal(
-                "correct_guess", player=player, movie_title=fuzzy_result.match, **kwargs
+                "correct_guess",
+                player=player_name,
+                movie_title=fuzzy_result.match,
+                **kwargs,
             )
             self.guess_timer.cancel()
         else:
-            if self.current_combo and self.current_combo.player == player:
+            self.stats.guess(
+                player_id=player_id,
+                player_name=player_name,
+                is_correct=False,
+                reaction_time=self.current_round.elapsed_time if first_guess else None,
+                is_ace=False,
+                streak=0,
+            )
+            if self.current_combo and self.current_combo.player == player_name:
                 self.current_combo = None
             await self.emit_signal(
-                "incorrect_guess", player=player, guess=guess, **kwargs
+                "incorrect_guess", player=player_name, guess=guess, **kwargs
             )
 
     async def game_loop(self, difficulty):
@@ -148,20 +317,21 @@ class Game:
         shot_number = 1
         while not self.populate_queue_task.done() or self.shots_queue.qsize() > 0:
             logging.debug("Getting shot from queue")
-            self.current_shot = await self.shots_queue.get()
+            shot = await self.shots_queue.get()
             logging.debug("Got shot from queue")
-            logging.debug("Movie title: %s", self.current_shot.movie_title)
+            logging.debug("Movie title: %s", shot.movie_title)
 
-            self.skip_votes = set()
-            self.status = GameStatus.WAITING_FOR_GUESSES
+            self.current_round = Round(shot)
             await self.emit_signal("new_shot", shot_number=shot_number)
-            self.guess_timer = asyncio.create_task(asyncio.sleep(GUESS_TIME_SECONDS))
+            self.guess_timer = self.current_round.start()
+            self.status = GameStatus.WAITING_FOR_GUESSES
 
             try:
                 await self.guess_timer
             except asyncio.CancelledError:
                 self.status = GameStatus.IDLE
             else:
+                self.current_combo = None
                 self.status = GameStatus.IDLE
                 await self.emit_signal("shot_timeout")
 
@@ -170,6 +340,7 @@ class Game:
 
             shot_number += 1
 
+        self.stats.end_game()
         await self.emit_signal("game_finished")
 
     async def skip(self):
@@ -186,13 +357,22 @@ class Game:
     def subscribe_to_signal(self, signal_name, callback):
         self.signal_subscribers[signal_name].append(callback)
 
-    async def vote_skip(self, player):
+    async def vote_skip(self, player_id, player_name):
+        logger.debug("Player voted to skip")
         if self.status != GameStatus.WAITING_FOR_GUESSES:
             return
 
-        self.skip_votes.add(player)
+        self.current_round.skip_votes.add(player_name)
+        self.stats.skip(player_id, player_name)
 
-        if len(self.skip_votes) >= len(self.scores) // 2:
+        if len(self.current_round.skip_votes) >= len(self.scores) // 2:
+            # Reset combo if the user holding the combo has voted to skip
+            if (
+                self.current_combo
+                and self.current_combo.player in self.current_round.skip_votes
+            ):
+                self.current_combo = None
+
             await self.skip()
 
 
@@ -223,7 +403,7 @@ class DiscordUi:
         congrats_messages = ["yay", "correct", "nice", "good job", "👏", "you rock"]
         congrats_message = random.choice(congrats_messages)
         embed = discord.Embed(
-            title=f"It was **{movie_title}** ({self.game.current_shot.movie_year})"
+            title=f"It was **{movie_title}** ({self.game.current_round.shot.movie_year})"
         )
         embed.add_field(
             name="**Leaderboard**", value="\n".join(self.get_ranking(self.game.scores)),
@@ -242,7 +422,7 @@ class DiscordUi:
         await message.add_reaction("❌")
 
     async def new_shot(self, shot_number):
-        shot = self.game.current_shot
+        shot = self.game.current_round.shot
         filename = shot.image_url[shot.image_url.rfind("/") :]
         embed = discord.Embed(
             title="Guess the movie! ⬆", description="To skip it, react with ⏭.",
@@ -258,7 +438,7 @@ class DiscordUi:
         await self.channel.send(
             embed=discord.Embed(
                 title="Time’s up! ⌛",
-                description=f"The movie was **{self.game.current_shot.movie_title}** ({self.game.current_shot.movie_year}).",
+                description=f"The movie was **{self.game.current_round.shot.movie_title}** ({self.game.current_round.shot.movie_year}).",
             )
         )
 
@@ -273,10 +453,20 @@ class DiscordUi:
         )
         await self.channel.send("The movie quiz is finished!", embed=embed)
 
+        try:
+            existing_stats = Stats.load(get_stats_file_path(self.channel.id))
+        except FileNotFoundError:
+            stats = self.game.stats
+        else:
+            stats = existing_stats + self.game.stats
+
+        with open(get_stats_file_path(self.channel.id), "w") as f:
+            f.write(stats.dumps())
+
     async def shot_skipped(self):
         embed = discord.Embed(
             title="Shot skipped",
-            description=f"The movie was **{self.game.current_shot.movie_title}** ({self.game.current_shot.movie_year}).",
+            description=f"The movie was **{self.game.current_round.shot.movie_title}** ({self.game.current_round.shot.movie_year}).",
         )
         await self.channel.send(embed=embed)
 
@@ -325,6 +515,7 @@ class WtmClient(discord.Client):
         try:
             await game.game_loop(difficulty)
         finally:
+            logger.debug("Game loop is finished, cleaning up UI")
             del self.uis[channel.id]
 
     async def on_reaction_add(self, reaction, user):
@@ -336,12 +527,13 @@ class WtmClient(discord.Client):
         except KeyError:
             return
 
+        logger.debug("Got reaction %s", reaction.emoji)
         if (
             ui.shot_message
             and ui.shot_message.id == reaction.message.id
             and reaction.emoji == "⏭"
         ):
-            await ui.game.vote_skip(user.name)
+            await ui.game.vote_skip(player_id=user.id, player_name=user.name)
 
     async def on_message(self, message):
         if message.author.id == self.user.id:
@@ -384,7 +576,10 @@ class WtmClient(discord.Client):
             )
         elif game and game.status == GameStatus.WAITING_FOR_GUESSES:
             await game.handle_guess(
-                message.author.name, message.content, message=message
+                player_name=message.author.name,
+                player_id=message.author.id,
+                guess=message.content,
+                message=message,
             )
 
     def get_command(self, message):
