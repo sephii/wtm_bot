@@ -1,5 +1,6 @@
 import asyncio
 import dataclasses
+import datetime
 import difflib
 import enum
 import io
@@ -11,16 +12,18 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List
 
 import discord
 
 from wtm_bot.wtm import Difficulty, WtmSession
 
-NB_SHOTS = 2
+NB_SHOTS = 12
 GUESS_TIME_SECONDS = 30
 MAX_COMBO = 2
-STATS_DIR = "/tmp/tmp"
+STATS_DIR = os.environ.get(
+    "STATS_DIR", os.path.join(os.path.abspath(os.path.dirname(__file__)), "stats")
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -59,40 +62,23 @@ class FuzzyResult:
 class Stat:
     player_id: str
     player_name: str
-    nb_games: int
     nb_guesses: int
-    nb_shots_guessed: int
+    nb_shots_played: int
     nb_correct_guesses: int
     nb_skips: int
     nb_aces: int
     max_streak: int
     reaction_time: float
-
-    def __add__(self, other):
-        if self.player_id != other.player_id:
-            raise ValueError("Players are not the same, cannot add")
-
-        return Stat(
-            player_id=self.player_id,
-            player_name=other.player_name,
-            nb_games=self.nb_games + other.nb_games,
-            nb_guesses=self.nb_guesses + other.nb_guesses,
-            nb_correct_guesses=self.nb_correct_guesses + other.nb_correct_guesses,
-            reaction_time=(
-                self.reaction_time * self.nb_shots_guessed
-                + other.reaction_time * other.nb_shots_guessed
-            )
-            / (self.nb_guesses + other.nb_guesses),
-            nb_skips=self.nb_skips + other.nb_skips,
-            nb_shots_guessed=self.nb_shots_guessed + other.nb_shots_guessed,
-            nb_aces=self.nb_aces + other.nb_aces,
-            max_streak=max(self.max_streak, other.max_streak),
-        )
+    precision: float
 
 
-class Stats:
-    def __init__(self):
-        self.stats = {}
+@dataclasses.dataclass()
+class GameStats:
+    difficulty: Difficulty
+    stats: Dict[int, Stat] = dataclasses.field(default_factory=dict)
+    started_at: datetime.datetime = dataclasses.field(
+        default_factory=lambda: datetime.datetime.utcnow()
+    )
 
     def get_stat(self, player_id, player_name):
         try:
@@ -101,75 +87,78 @@ class Stats:
             return Stat(
                 player_id=player_id,
                 player_name=player_name,
-                nb_games=0,
                 nb_guesses=0,
-                nb_shots_guessed=0,
+                nb_shots_played=0,
                 nb_correct_guesses=0,
                 reaction_time=0,
                 nb_skips=0,
                 nb_aces=0,
                 max_streak=0,
+                precision=0,
             )
 
     def skip(self, player_id, player_name):
         stat = self.get_stat(player_id, player_name)
         self.stats[player_id] = dataclasses.replace(stat, nb_skips=stat.nb_skips + 1)
 
-    def guess(self, player_id, player_name, is_correct, is_ace, reaction_time, streak):
+    def guess(
+        self,
+        player_id,
+        player_name,
+        is_correct,
+        is_ace,
+        reaction_time,
+        streak,
+        precision,
+    ):
         stat = self.get_stat(player_id, player_name)
         self.stats[player_id] = dataclasses.replace(
             stat,
             nb_guesses=stat.nb_guesses + 1,
-            nb_shots_guessed=stat.nb_shots_guessed
-            + (0 if reaction_time is None else 1),
+            nb_shots_played=stat.nb_shots_played + (0 if reaction_time is None else 1),
             nb_correct_guesses=stat.nb_correct_guesses + (1 if is_correct else 0),
-            reaction_time=(stat.reaction_time * stat.nb_shots_guessed + reaction_time)
-            / (stat.nb_shots_guessed + 1)
+            reaction_time=(stat.reaction_time * stat.nb_shots_played + reaction_time)
+            / (stat.nb_shots_played + 1)
             if reaction_time is not None
             else stat.reaction_time,
             nb_aces=stat.nb_aces + (1 if is_ace else 0),
             max_streak=max(stat.max_streak, streak),
+            precision=(stat.precision * stat.nb_correct_guesses + precision)
+            / (stat.nb_correct_guesses + 1)
+            if precision is not None
+            else stat.precision,
         )
 
-    def end_game(self):
-        self.stats = {
-            player_id: dataclasses.replace(stat, nb_games=stat.nb_games + 1)
-            for player_id, stat in self.stats.items()
-        }
-
     @staticmethod
-    def load(file_path):
-        stats = Stats()
-
+    def load(file_path) -> List["GameStats"]:
         with open(file_path, "r") as f:
-            stats.stats = {
-                int(player_id): Stat(**obj)
-                for player_id, obj in json.loads(f.read()).items()
-            }
+            stats_list = json.loads(f.read())
+
+        stats = [
+            GameStats(
+                started_at=datetime.datetime.fromtimestamp(
+                    stat["started_at"], datetime.timezone.utc
+                ),
+                stats={
+                    int(player_id): Stat(**obj)
+                    for player_id, obj in stat["stats"].items()
+                },
+                difficulty=Difficulty(stat["difficulty"]),
+            )
+            for stat in stats_list
+        ]
 
         return stats
 
-    def dumps(self):
-        return json.dumps(
-            {
+    def asdict(self):
+        return {
+            "difficulty": self.difficulty.value,
+            "started_at": self.started_at.timestamp(),
+            "stats": {
                 player_id: dataclasses.asdict(stat)
                 for player_id, stat in self.stats.items()
-            }
-        )
-
-    def __add__(self, other):
-        stats = {player_id: stat for player_id, stat in self.stats.items()}
-
-        for player_id, stat in other.stats.items():
-            if player_id not in stats:
-                stats[player_id] = stat
-            else:
-                stats[player_id] += stat
-
-        s = Stats()
-        s.stats = stats
-
-        return s
+            },
+        }
 
 
 def get_stats_file_path(game_id: int) -> str:
@@ -226,12 +215,13 @@ class Round:
 
 
 class Game:
-    def __init__(self, *, wtm_user, wtm_password, tmdb_token):
+    def __init__(self, *, wtm_user, wtm_password, tmdb_token, difficulty):
         self.wtm_user = wtm_user
         self.wtm_password = wtm_password
 
+        self.difficulty = difficulty
         self.scores = defaultdict(int)
-        self.stats = Stats()
+        self.stats = GameStats(difficulty=difficulty)
         self.wtm_session = WtmSession(tmdb_token)
         self.status = GameStatus.IDLE
         self.guess_timer = None
@@ -268,6 +258,7 @@ class Game:
                 reaction_time=self.current_round.elapsed_time if first_guess else None,
                 is_ace=first_guess,
                 streak=streak,
+                precision=fuzzy_result.score,
             )
 
             self.scores[player_name] += min(self.current_combo.combo, MAX_COMBO)
@@ -288,6 +279,7 @@ class Game:
                 reaction_time=self.current_round.elapsed_time if first_guess else None,
                 is_ace=False,
                 streak=0,
+                precision=None,
             )
             if self.current_combo and self.current_combo.player == player_name:
                 self.current_combo = None
@@ -295,10 +287,10 @@ class Game:
                 "incorrect_guess", player=player_name, guess=guess, **kwargs
             )
 
-    async def game_loop(self, difficulty):
+    async def game_loop(self):
         self.status = GameStatus.LOADING
         await self.wtm_session.login(self.wtm_user, self.wtm_password)
-        await self.wtm_session.set_difficulty(difficulty)
+        await self.wtm_session.set_difficulty(self.difficulty)
         self.populate_queue_task = asyncio.create_task(self.populate_queue())
         guess_loop_task = asyncio.create_task(self.guess_loop())
 
@@ -340,7 +332,6 @@ class Game:
 
             shot_number += 1
 
-        self.stats.end_game()
         await self.emit_signal("game_finished")
 
     async def skip(self):
@@ -454,14 +445,17 @@ class DiscordUi:
         await self.channel.send("The movie quiz is finished!", embed=embed)
 
         try:
-            existing_stats = Stats.load(get_stats_file_path(self.channel.id))
+            existing_stats = GameStats.load(get_stats_file_path(self.channel.id))
         except FileNotFoundError:
-            stats = self.game.stats
+            stats = [self.game.stats]
         else:
-            stats = existing_stats + self.game.stats
+            stats = existing_stats + [self.game.stats]
+
+        if not os.path.exists(STATS_DIR):
+            os.makedirs(STATS_DIR)
 
         with open(get_stats_file_path(self.channel.id), "w") as f:
-            f.write(stats.dumps())
+            f.write(json.dumps([stat.asdict() for stat in stats]))
 
     async def shot_skipped(self):
         embed = discord.Embed(
@@ -507,13 +501,14 @@ class WtmClient(discord.Client):
             wtm_user=self.wtm_user,
             wtm_password=self.wtm_password,
             tmdb_token=self.tmdb_token,
+            difficulty=difficulty,
         )
         ui = DiscordUi(channel, game)
 
         self.uis[channel.id] = ui
 
         try:
-            await game.game_loop(difficulty)
+            await game.game_loop()
         finally:
             logger.debug("Game loop is finished, cleaning up UI")
             del self.uis[channel.id]
