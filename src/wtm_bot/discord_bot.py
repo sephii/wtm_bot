@@ -166,8 +166,18 @@ def get_stats_file_path(game_id: int) -> str:
 
 
 def _fuzzy_compare_str(str1, str2):
-    str1_lower = str1.lower()
-    str1_parts = str1_lower.split(":") + [str1_lower]
+    str1, str2 = str1.lower(), str2.lower()
+
+    # I mean come on, no one ever knows the name of the episode
+    if (
+        "harry potter" in str1
+        and "harry fucking potter" in str2
+        or "indiana jones" in str1
+        and "indiana fucking jones" in str2
+    ):
+        return 1
+
+    str1_parts = str1.split(":") + [str1]
     max_ratio = max(
         difflib.SequenceMatcher(lambda x: x in " \t", str1_part, str2).ratio()
         for str1_part in str1_parts
@@ -181,7 +191,6 @@ def fuzzy_compare(solutions, guess):
     Compare a list of solutions and a guess, and return the highest scoring one
     as a `FuzzyResult`, or `None` if there’s no match.
     """
-    guess = guess.lower()
     results = [
         FuzzyResult(match=solution, score=_fuzzy_compare_str(solution, guess))
         for solution in solutions
