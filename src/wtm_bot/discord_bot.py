@@ -579,12 +579,16 @@ class WtmClient(discord.Client):
                 "Available commands are: start [easy|medium|hard]."
             )
         elif game and game.status == GameStatus.WAITING_FOR_GUESSES:
-            await game.handle_guess(
-                player_name=message.author.name,
-                player_id=message.author.id,
-                guess=message.content,
-                message=message,
-            )
+            stripped_content = message.content.strip()
+            if not (
+                stripped_content.startswith("(") and stripped_content.endswith(")")
+            ):
+                await game.handle_guess(
+                    player_name=message.author.name,
+                    player_id=message.author.id,
+                    guess=stripped_content,
+                    message=message,
+                )
 
     def get_command(self, message):
         mention = f"<@!{self.user.id}>"
