@@ -619,7 +619,7 @@ class WtmClient(discord.Client):
                 )
 
         ranking = sorted(
-            [sum(stats[1:], start=stats[0]) for stats in player_stats.values()],
+            [sum(stats[1:], stats[0]) for stats in player_stats.values()],
             key=lambda item: (item.avg_correct_guesses_per_game, item.nb_games),
             reverse=True,
         )
