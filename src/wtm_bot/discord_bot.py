@@ -16,6 +16,7 @@ from typing import Dict, List
 
 import discord
 
+from wtm_bot.table import Heading, Justify, Table
 from wtm_bot.wtm import Difficulty, WtmSession
 
 NB_SHOTS = 12
@@ -38,6 +39,7 @@ class GameStatus(enum.Enum):
 class CommandType(enum.Enum):
     START = "start"
     HELP = "help"
+    STATS = "stats"
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,60 @@ class Stat:
     max_streak: int
     reaction_time: float
     precision: float
+
+
+@dataclass(frozen=True)
+class PlayerStat:
+    player_id: str
+    player_name: str
+    nb_guesses: int
+    nb_shots_played: int
+    nb_correct_guesses: int
+    nb_skips: int
+    nb_aces: int
+    max_streak: int
+    reaction_time: float
+    precision: float
+    nb_games: int = 1
+
+    def __add__(self, other):
+        return PlayerStat(
+            player_id=other.player_id,
+            player_name=other.player_name,
+            nb_guesses=self.nb_guesses + other.nb_guesses,
+            nb_shots_played=self.nb_shots_played + other.nb_shots_played,
+            nb_correct_guesses=self.nb_correct_guesses + other.nb_correct_guesses,
+            nb_skips=self.nb_skips + other.nb_skips,
+            nb_aces=self.nb_aces + other.nb_aces,
+            max_streak=max(self.max_streak, other.max_streak),
+            reaction_time=(
+                self.reaction_time * self.nb_shots_played
+                + other.reaction_time * other.nb_shots_played
+            )
+            / (self.nb_shots_played + other.nb_shots_played)
+            if self.nb_shots_played + other.nb_shots_played > 0
+            else 0,
+            precision=(
+                self.precision * self.nb_correct_guesses
+                + other.precision * other.nb_correct_guesses
+            )
+            / (self.nb_correct_guesses + other.nb_correct_guesses)
+            if self.nb_correct_guesses + other.nb_correct_guesses > 0
+            else 0,
+            nb_games=self.nb_games + 1,
+        )
+
+    @property
+    def avg_guesses_per_game(self):
+        return self.nb_guesses / self.nb_games
+
+    @property
+    def avg_correct_guesses_per_game(self):
+        return self.nb_correct_guesses / self.nb_games
+
+    @property
+    def correct_guesses_ratio(self):
+        return self.nb_correct_guesses / self.nb_guesses * 100
 
 
 @dataclasses.dataclass()
@@ -522,6 +578,71 @@ class WtmClient(discord.Client):
             logger.debug("Game loop is finished, cleaning up UI")
             del self.uis[channel.id]
 
+    async def show_stats(self, channel):
+        try:
+            game_stats = GameStats.load(get_stats_file_path(channel.id))
+        except FileNotFoundError:
+            await channel.send(
+                "No games played yet. Start a game with `@WhatTheMovie start`!"
+            )
+            return
+
+        table = Table(
+            [
+                Heading("#", justify=Justify.RIGHT),
+                Heading("Player"),
+                Heading("Games", justify=Justify.RIGHT),
+                Heading("Correct guesses", justify=Justify.RIGHT),
+                Heading("Total guesses", justify=Justify.RIGHT),
+                Heading("Ratio (%)", justify=Justify.RIGHT),
+                Heading("Max streak", justify=Justify.RIGHT),
+                Heading("Avg reaction time (s)", justify=Justify.RIGHT),
+            ]
+        )
+        player_stats = {}
+
+        for game in game_stats:
+            for player_id, stat in game.stats.items():
+                player_stats.setdefault(player_id, []).append(
+                    PlayerStat(
+                        player_id=stat.player_id,
+                        player_name=stat.player_name,
+                        nb_guesses=stat.nb_guesses,
+                        nb_shots_played=stat.nb_shots_played,
+                        nb_correct_guesses=stat.nb_correct_guesses,
+                        nb_skips=stat.nb_skips,
+                        nb_aces=stat.nb_aces,
+                        max_streak=stat.max_streak,
+                        reaction_time=stat.reaction_time,
+                        precision=stat.precision,
+                    )
+                )
+
+        ranking = sorted(
+            [sum(stats[1:], start=stats[0]) for stats in player_stats.values()],
+            key=lambda item: (item.avg_correct_guesses_per_game, item.nb_games),
+            reverse=True,
+        )
+
+        for position, stat in enumerate(ranking, 1):
+            table.add_row(
+                str(position),
+                stat.player_name,
+                str(stat.nb_games),
+                str(stat.nb_correct_guesses),
+                str(stat.nb_guesses),
+                str(f"{stat.correct_guesses_ratio:.2f}"),
+                str(stat.max_streak),
+                str(f"{stat.reaction_time:.2f}"),
+            )
+
+        await channel.send(
+            f"""
+```
+{str(table)}
+```"""
+        )
+
     async def on_reaction_add(self, reaction, user):
         if user.id == self.user.id:
             return
@@ -578,6 +699,8 @@ class WtmClient(discord.Client):
             await message.channel.send(
                 "Available commands are: start [easy|medium|hard]."
             )
+        elif command and command.type == CommandType.STATS and not game:
+            await self.show_stats(message.channel)
         elif game and game.status == GameStatus.WAITING_FOR_GUESSES:
             stripped_content = message.content.strip()
             if not (
