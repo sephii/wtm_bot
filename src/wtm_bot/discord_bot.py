@@ -272,7 +272,8 @@ class Round:
 
     def guess(self, player_id, guess):
         fuzzy_result = fuzzy_compare(
-            set([self.shot.movie_title]) | self.shot.movie_alternative_titles, guess,
+            set([self.shot.movie_title]) | self.shot.movie_alternative_titles,
+            guess,
         )
         self.guessers.add(player_id)
 
@@ -309,7 +310,8 @@ class Game:
         if fuzzy_result and fuzzy_result.score >= 0.8:
             if self.current_combo and self.current_combo.player == player_name:
                 self.current_combo = dataclasses.replace(
-                    self.current_combo, combo=self.current_combo.combo + 1,
+                    self.current_combo,
+                    combo=self.current_combo.combo + 1,
                 )
                 streak = self.current_combo.combo
             else:
@@ -326,13 +328,15 @@ class Game:
                 precision=fuzzy_result.score,
             )
 
-            self.scores[player_name] += min(self.current_combo.combo, MAX_COMBO)
+            scored_points = min(self.current_combo.combo, MAX_COMBO)
+            self.scores[player_name] += scored_points
 
             self.status = GameStatus.LOADING
             await self.emit_signal(
                 "correct_guess",
                 player=player_name,
                 movie_title=fuzzy_result.match,
+                scored_points=scored_points,
                 **kwargs,
             )
             self.guess_timer.cancel()
@@ -455,21 +459,22 @@ class DiscordUi:
             for symbol, (name, score) in zip(["🥇", "🥈", "🥉"], ranking)
         ]
 
-    async def correct_guess(self, player, message, movie_title):
+    async def correct_guess(self, player, message, movie_title, scored_points):
         congrats_messages = ["yay", "correct", "nice", "good job", "👏", "you rock"]
         congrats_message = random.choice(congrats_messages)
         embed = discord.Embed(
             title=f"It was **{movie_title}** ({self.game.current_round.shot.movie_year})"
         )
         embed.add_field(
-            name="**Leaderboard**", value="\n".join(self.get_ranking(self.game.scores)),
+            name="**Leaderboard**",
+            value="\n".join(self.get_ranking(self.game.scores)),
         )
-        pts = self.game.current_combo.combo
-        pts_description = "pt" if pts < 2 else "pts"
+        new_combo = min(scored_points + 1, MAX_COMBO)
+        pts_description = "pt" if scored_points < 2 else "pts"
         asyncio.gather(
             message.add_reaction("✅"),
             self.channel.send(
-                f"@{player} {congrats_message}! You earn **{pts} {pts_description}**. Keep scoring to use your {min(self.game.current_combo.combo + 1, MAX_COMBO)}x multiplier!",
+                f"@{player} {congrats_message}! You earn **{scored_points} {pts_description}**. Keep scoring to use your {new_combo}x multiplier!",
                 embed=embed,
             ),
         )
@@ -481,12 +486,18 @@ class DiscordUi:
         shot = self.game.current_round.shot
         filename = shot.image_url[shot.image_url.rfind("/") :]
         embed = discord.Embed(
-            title="Guess the movie! ⬆", description="To skip it, react with ⏭.",
+            title="Guess the movie! ⬆",
+            description="To skip it, react with ⏭.",
         )
         embed.set_footer(text=f"{shot_number} / {NB_SHOTS}")
         self.shot_message = await self.channel.send(
             embed=embed,
-            files=[discord.File(fp=io.BytesIO(shot.image_data), filename=filename,)],
+            files=[
+                discord.File(
+                    fp=io.BytesIO(shot.image_data),
+                    filename=filename,
+                )
+            ],
         )
         await self.shot_message.add_reaction("⏭")
 
