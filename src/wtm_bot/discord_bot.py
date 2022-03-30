@@ -186,7 +186,7 @@ class GameStats:
         )
 
     @staticmethod
-    def load(file_path) -> List["GameStats"]:
+    def load(file_path, difficulty) -> List["GameStats"]:
         with open(file_path, "r") as f:
             stats_list = json.loads(f.read())
 
@@ -202,6 +202,7 @@ class GameStats:
                 difficulty=Difficulty(stat["difficulty"]),
             )
             for stat in stats_list
+            if difficulty == Difficulty.ALL or stat["difficulty"] == difficulty.value
         ]
 
         return stats
@@ -589,9 +590,11 @@ class WtmClient(discord.Client):
             logger.debug("Game loop is finished, cleaning up UI")
             del self.uis[channel.id]
 
-    async def show_stats(self, channel):
+    async def show_stats(self, channel, difficulty):
         try:
-            game_stats = GameStats.load(get_stats_file_path(channel.id))
+            game_stats = GameStats.load(
+                get_stats_file_path(channel.id), difficulty=difficulty
+            )
         except FileNotFoundError:
             await channel.send(
                 "No games played yet. Start a game with `@WhatTheMovie start`!"
@@ -712,7 +715,21 @@ class WtmClient(discord.Client):
                 "Available commands are: start [easy|medium|hard]."
             )
         elif command and command.type == CommandType.STATS and not game:
-            await self.show_stats(message.channel)
+            if command.args:
+                try:
+                    difficulty = Difficulty(command.args[0])
+                except ValueError:
+                    await message.channel.send(
+                        "Please select a valid difficulty: "
+                        + ", ".join(
+                            [f"**{difficulty.value}**" for difficulty in Difficulty]
+                        )
+                    )
+                    return
+            else:
+                difficulty = Difficulty.ALL
+
+            await self.show_stats(message.channel, difficulty)
         elif game and game.status == GameStatus.WAITING_FOR_GUESSES:
             stripped_content = message.content.strip()
             if not (
