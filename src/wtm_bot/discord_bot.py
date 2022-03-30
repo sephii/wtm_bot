@@ -606,11 +606,11 @@ class WtmClient(discord.Client):
                 Heading("#", justify=Justify.RIGHT),
                 Heading("Player"),
                 Heading("Games", justify=Justify.RIGHT),
-                Heading("Correct guesses", justify=Justify.RIGHT),
-                Heading("Total guesses", justify=Justify.RIGHT),
-                Heading("Ratio (%)", justify=Justify.RIGHT),
+                Heading("Avg correct guesses / game", justify=Justify.RIGHT),
+                Heading("Guesses", justify=Justify.RIGHT),
+                Heading("Correct", justify=Justify.RIGHT),
                 Heading("Max streak", justify=Justify.RIGHT),
-                Heading("Avg reaction time (s)", justify=Justify.RIGHT),
+                Heading("Avg reac. (s)", justify=Justify.RIGHT),
             ]
         )
         player_stats = {}
@@ -644,9 +644,9 @@ class WtmClient(discord.Client):
                 str(position),
                 stat.player_name,
                 str(stat.nb_games),
-                str(stat.nb_correct_guesses),
+                str(f"{stat.avg_correct_guesses_per_game:.2f}"),
                 str(stat.nb_guesses),
-                str(f"{stat.correct_guesses_ratio:.2f}"),
+                str(stat.nb_correct_guesses),
                 str(stat.max_streak),
                 str(f"{stat.reaction_time:.2f}"),
             )
