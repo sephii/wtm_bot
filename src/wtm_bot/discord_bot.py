@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 from collections import defaultdict
@@ -743,12 +744,15 @@ class WtmClient(discord.Client):
                 )
 
     def get_command(self, message):
-        mention = f"<@!{self.user.id}>"
-
-        if not message.content.startswith(mention):
+        match = re.match(r"<@!?(\d+)>(.*)", message.content)
+        if not match:
             return None
 
-        command = message.content[len(mention) :].strip()
+        mention_user_id = match.group(1)
+        if mention_user_id != str(self.user.id):
+            return None
+
+        command = match.group(2).strip()
         try:
             command_type, *args = command.split(" ")
         except ValueError:
