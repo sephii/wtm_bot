@@ -1,10 +1,10 @@
 {
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-21.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs";
   outputs = { nixpkgs, ... }:
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
-      python = pkgs.python39;
+      python = pkgs.python3;
     in {
       defaultPackage.${system} = python.pkgs.buildPythonPackage {
         pname = "whatthemovie";
