@@ -544,8 +544,8 @@ class DiscordUi:
 
 
 class WtmClient(discord.Client):
-    def __init__(self, wtm_user, wtm_password, tmdb_token):
-        super().__init__()
+    def __init__(self, wtm_user, wtm_password, tmdb_token, **kwargs):
+        super().__init__(**kwargs)
         self.uis = {}
         self.wtm_user = wtm_user
         self.wtm_password = wtm_password
@@ -776,7 +776,11 @@ def main():
         )
         sys.exit(1)
 
+    intents = discord.Intents.default()
+    intents.message_content = True
+
     client = WtmClient(
+        intents=intents,
         wtm_user=env_vars["WTM_USER"],
         wtm_password=env_vars["WTM_PASSWORD"],
         tmdb_token=env_vars["TMDB_TOKEN"],
