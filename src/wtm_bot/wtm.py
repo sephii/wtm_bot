@@ -63,7 +63,8 @@ class TmdbClient:
     async def get_alternative_titles(self, title, year):
         url = tmdb_base_url + "/search/movie"
         response = await self.client.get(
-            url, params={"api_key": self.api_key, "query": title, "year": year},
+            url,
+            params={"api_key": self.api_key, "query": title, "year": year},
         )
 
         if response.status_code != 200:
@@ -102,6 +103,7 @@ class WtmSession:
                 "authenticity_token": token,
                 "utf8": "✓",
             },
+            follow_redirects=True,
         )
 
         csrf_token = get_parser(response.content).select("meta[name='csrf-token']")[0][
@@ -124,7 +126,9 @@ class WtmSession:
         shot = None
 
         while not shot:
-            response = await self.client.get(wtm_url("/shot/random"))
+            response = await self.client.get(
+                wtm_url("/shot/random"), follow_redirects=True
+            )
             parser = get_parser(response.content)
             image = parser.select("#still_shot")[0]["src"]
             try:
