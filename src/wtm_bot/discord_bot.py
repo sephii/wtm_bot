@@ -523,7 +523,9 @@ class DiscordUi:
         await self.channel.send("The movie quiz is finished!", embed=embed)
 
         try:
-            existing_stats = GameStats.load(get_stats_file_path(self.channel.id))
+            existing_stats = GameStats.load(
+                get_stats_file_path(self.channel.id), difficulty=self.game.difficulty
+            )
         except FileNotFoundError:
             stats = [self.game.stats]
         else:
