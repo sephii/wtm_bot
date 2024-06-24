@@ -37,7 +37,12 @@ class Table:
                 self._maxlen.append(max(arg_len, len(self.headings[pos].label)))
 
     def col_width(self, col_number: int) -> int:
-        return self._maxlen[col_number] + self.padding * 2
+        try:
+            col_width = self._maxlen[col_number]
+        except IndexError:
+            col_width = 0
+
+        return col_width + self.padding * 2
 
     def as_str(self) -> str:
         padding = " " * self.padding
@@ -68,9 +73,7 @@ class Table:
                 just_func = (
                     col.ljust
                     if heading.justify == Justify.LEFT
-                    else col.rjust
-                    if heading.justify == Justify.RIGHT
-                    else col.center
+                    else col.rjust if heading.justify == Justify.RIGHT else col.center
                 )
                 label = just_func(self._maxlen[col_number])
 

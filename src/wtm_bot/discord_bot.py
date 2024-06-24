@@ -640,7 +640,6 @@ class WtmClient(discord.Client):
             key=lambda item: (item.avg_correct_guesses_per_game, item.nb_games),
             reverse=True,
         )
-        ranking = [stats for stats in ranking if stats.nb_games >= 10]
 
         for position, stat in enumerate(ranking[:10], 1):
             table.add_row(
