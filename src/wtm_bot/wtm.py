@@ -48,9 +48,13 @@ class TmdbClient:
 
     async def get_movie_name(self, movie_id, lang):
         url = tmdb_base_url + f"/movie/{movie_id}"
-        response = await self.client.get(
-            url, params={"language": lang, "api_key": self.api_key}
-        )
+
+        try:
+            response = await self.client.get(
+                url, params={"language": lang, "api_key": self.api_key}
+            )
+        except httpx.ReadTimeout:
+            return None
 
         if response.status_code != 200:
             return None
@@ -62,10 +66,14 @@ class TmdbClient:
 
     async def get_alternative_titles(self, title, year):
         url = tmdb_base_url + "/search/movie"
-        response = await self.client.get(
-            url,
-            params={"api_key": self.api_key, "query": title, "year": year},
-        )
+
+        try:
+            response = await self.client.get(
+                url,
+                params={"api_key": self.api_key, "query": title, "year": year},
+            )
+        except httpx.ReadTimeout:
+            return set()
 
         if response.status_code != 200:
             return set()
