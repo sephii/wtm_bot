@@ -53,7 +53,7 @@ class TmdbClient:
             response = await self.client.get(
                 url, params={"language": lang, "api_key": self.api_key}
             )
-        except httpx.ReadTimeout:
+        except (httpx.ReadTimeout, httpx.ConnectTimeout):
             return None
 
         if response.status_code != 200:
@@ -72,7 +72,7 @@ class TmdbClient:
                 url,
                 params={"api_key": self.api_key, "query": title, "year": year},
             )
-        except httpx.ReadTimeout:
+        except (httpx.ReadTimeout, httpx.ConnectTimeout):
             return set()
 
         if response.status_code != 200:
