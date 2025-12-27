@@ -1,0 +1,24 @@
+[project]
+name = "wtm_bot"
+description = "Whatthemovie, Discord version"
+authors = [
+    {name = "Sylvain Fankhauser", email = "sephi@nibelheim.ch"},
+]
+readme = "README.md"
+requires-python = ">=3.10"
+version = "1.0"
+dependencies = [
+  "httpx",
+  "beautifulsoup4",
+  "discord.py",
+]
+
+[project.urls]
+Source = "https://github.com/sephii/wtm_bot"
+
+[project.scripts]
+wtm-bot = "wtm_bot.discord_bot:main"
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
